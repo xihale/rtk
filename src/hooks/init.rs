@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, FORGE_DIR,
+    FORGE_HOOK_FILE, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -3775,4 +3776,61 @@ More notes
             );
         });
     }
+}
+
+// ─── Forge Code support ─────────────────────────────────────────────
+
+/// Forge hook wrapper script — delegates to `rtk hook forge`
+const FORGE_HOOK_SCRIPT: &str = r#"#!/bin/bash
+exec rtk hook forge
+"#;
+
+fn resolve_forge_dir() -> Result<PathBuf> {
+    resolve_home_subdir(FORGE_DIR)
+}
+
+/// Entry point for `rtk init --agent forge`
+pub fn run_forge(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Forge support is global-only. Use: rtk init -g --agent forge");
+    }
+
+    let forge_dir = resolve_forge_dir()?;
+    fs::create_dir_all(&forge_dir).with_context(|| {
+        format!(
+            "Failed to create Forge config dir: {}",
+            forge_dir.display()
+        )
+    })?;
+
+    // 1. Install hook script
+    let hook_dir = forge_dir.join(HOOKS_SUBDIR);
+    fs::create_dir_all(&hook_dir).context("Failed to create Forge hooks dir")?;
+    let hook_path = hook_dir.join(FORGE_HOOK_FILE);
+
+    if verbose > 0 {
+        println!("Installing Forge hook to: {}", hook_path.display());
+    }
+    fs::write(&hook_path, FORGE_HOOK_SCRIPT).context("Failed to write Forge hook script")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&hook_path, perms)?;
+    }
+
+    // 2. Install RTK.md
+    let rtk_md_path = forge_dir.join(RTK_MD);
+    if verbose > 0 {
+        println!("Installing RTK.md to: {}", rtk_md_path.display());
+    }
+    fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
+
+    println!("  Forge hook installed to ~/.forge/hooks/{}", FORGE_HOOK_FILE);
+    println!("  RTK.md installed to ~/.forge/RTK.md");
+    println!("\nForge Code will now automatically use RTK for shell commands.");
+
+    Ok(())
 }
