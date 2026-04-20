@@ -2181,3 +2181,51 @@ mod tests {
         assert!(run_vibe_inner(&input).is_none());
     }
 }
+
+// ── Forge hook ───────────────────────────────────────────────
+
+/// Run the Forge Code ToolcallStart hook.
+pub fn run_forge() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+
+    let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if tool_name != "shell" {
+        print_allow();
+        return Ok(());
+    }
+
+    let cmd = json
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        print_allow();
+        return Ok(());
+    }
+
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+
+    match rewrite_command(cmd, &excluded, &transparent_prefixes) {
+        Some(ref rewritten) => {
+            if rewritten == cmd {
+                print_allow();
+            } else {
+                audit_log("rewrite", cmd, rewritten);
+                let output = serde_json::json!({
+                    "decision": "allow",
+                    "hookSpecificOutput": { "tool_input": { "command": rewritten } }
+                });
+                let _ = writeln!(io::stdout(), "{output}");
+            }
+        }
+        None => print_allow(),
+    }
+
+    Ok(())
+}

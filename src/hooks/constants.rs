@@ -1,5 +1,6 @@
 pub const REWRITE_HOOK_FILE: &str = "rtk-rewrite.sh";
 pub const GEMINI_HOOK_FILE: &str = "rtk-hook-gemini.sh";
+pub const FORGE_HOOK_FILE: &str = "rtk-hook-forge.sh";
 pub const CLAUDE_DIR: &str = ".claude";
 pub const HOOKS_SUBDIR: &str = "hooks";
 pub const SETTINGS_JSON: &str = "settings.json";
@@ -67,3 +68,5 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+
+pub const FORGE_DIR: &str = ".forge";
