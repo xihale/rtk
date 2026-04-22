@@ -612,6 +612,7 @@ enum Commands {
         passthrough: bool,
     },
 
+
     /// Trust project-local TOML filters in current directory
     Trust {
         /// List all trusted projects
@@ -1094,6 +1095,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "verify",
     "trust",
     "untrust",
+    "update",
     "session",
     "rewrite",
 ];
@@ -2311,6 +2313,7 @@ fn run_cli() -> Result<i32> {
 
             core::utils::exit_code_from_status(&status, &cmd_name)
         }
+
 
         Commands::Trust { list } => {
             hooks::trust::run_trust(list)?;
