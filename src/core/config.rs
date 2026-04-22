@@ -5,6 +5,27 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// How often rtk checks for updates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateFrequency {
+    /// Check on every invocation (default).
+    #[default]
+    Always,
+    /// Check at most once per day.
+    Daily,
+    /// Never check for updates.
+    Never,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateConfig {
+    /// How often to check for a newer version.
+    /// Accepted values: "always", "daily", "never" (default: "always").
+    #[serde(default)]
+    pub frequency: UpdateFrequency,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -21,6 +42,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub updates: UpdateConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -247,5 +270,35 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_updates_frequency_never() {
+        let toml = r#"
+[updates]
+frequency = "never"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.updates.frequency, UpdateFrequency::Never);
+    }
+
+    #[test]
+    fn test_updates_frequency_daily() {
+        let toml = r#"
+[updates]
+frequency = "daily"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.updates.frequency, UpdateFrequency::Daily);
+    }
+
+    #[test]
+    fn test_updates_frequency_default() {
+        let toml = r#"
+[tracking]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.updates.frequency, UpdateFrequency::Always);
     }
 }
