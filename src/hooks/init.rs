@@ -15,12 +15,12 @@ use crate::hooks::constants::{
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DROID_DIR,
     DROID_EXECUTE_MATCHER, DROID_HOME_ENV, DROID_HOOKS_FILE, DROID_HOOKS_SUBDIR,
-    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, FORGE_DIR, FORGE_HOOK_FILE, GEMINI_HOOK_FILE,
-    HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
-    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
-    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME,
-    VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
+    DROID_HOOK_COMMAND, DROID_SETTINGS_FILE, FORGE_DIR, FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE,
+    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOKS_FILE,
+    VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_PROMPTS_SUBDIR, VIBE_PROMPT_FILE,
 };
 use super::integrity;
 use super::is_claude_hook_command;
@@ -8415,9 +8415,19 @@ pub fn run_forge(global: bool, verbose: u8) -> Result<()> {
     fs::create_dir_all(&forge_dir)
         .with_context(|| format!("Failed to create Forge config dir: {}", forge_dir.display()))?;
 
-    // 1. Install hook script
-    let hook_dir = forge_dir.join(HOOKS_SUBDIR);
+    // 1. Install hook script into ~/.forge/hooks/toolcall-start.d/rtk.sh
+    let hook_dir = forge_dir.join(HOOKS_SUBDIR).join(FORGE_HOOK_EVENT_DIR);
     fs::create_dir_all(&hook_dir).context("Failed to create Forge hooks dir")?;
+
+    // Clean up legacy hook from old location
+    let legacy_hook = forge_dir.join(HOOKS_SUBDIR).join("rtk-hook-forge.sh");
+    if legacy_hook.exists() {
+        let _ = fs::remove_file(&legacy_hook);
+        if verbose > 0 {
+            println!("  Removed legacy hook: {}", legacy_hook.display());
+        }
+    }
+
     let hook_path = hook_dir.join(FORGE_HOOK_FILE);
 
     if verbose > 0 {
@@ -8441,8 +8451,8 @@ pub fn run_forge(global: bool, verbose: u8) -> Result<()> {
     fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
 
     println!(
-        "  Forge hook installed to ~/.forge/hooks/{}",
-        FORGE_HOOK_FILE
+        "  Forge hook installed to ~/.forge/hooks/{}/{}",
+        FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE
     );
     println!("  RTK.md installed to ~/.forge/RTK.md");
     println!("\nForge Code will now automatically use RTK for shell commands.");

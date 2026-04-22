@@ -22,6 +22,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "verify",
     "trust",
     "untrust",
+    "update",
     "session",
     "rewrite",
     "telemetry",

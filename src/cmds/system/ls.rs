@@ -49,6 +49,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so ls outputs English month names (Jan, Feb, …) which
+    // the date regex expects.  Without this, non-English locales (e.g. zh_CN)
+    // produce localised dates that don't match, resulting in "(empty)".
     cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
