@@ -8,8 +8,8 @@ use tempfile::NamedTempFile;
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, FORGE_DIR,
-    FORGE_HOOK_FILE, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -3803,9 +3803,19 @@ pub fn run_forge(global: bool, verbose: u8) -> Result<()> {
         )
     })?;
 
-    // 1. Install hook script
-    let hook_dir = forge_dir.join(HOOKS_SUBDIR);
+    // 1. Install hook script into ~/.forge/hooks/toolcall-start.d/rtk.sh
+    let hook_dir = forge_dir.join(HOOKS_SUBDIR).join(FORGE_HOOK_EVENT_DIR);
     fs::create_dir_all(&hook_dir).context("Failed to create Forge hooks dir")?;
+
+    // Clean up legacy hook from old location
+    let legacy_hook = forge_dir.join(HOOKS_SUBDIR).join("rtk-hook-forge.sh");
+    if legacy_hook.exists() {
+        let _ = fs::remove_file(&legacy_hook);
+        if verbose > 0 {
+            println!("  Removed legacy hook: {}", legacy_hook.display());
+        }
+    }
+
     let hook_path = hook_dir.join(FORGE_HOOK_FILE);
 
     if verbose > 0 {
@@ -3828,7 +3838,10 @@ pub fn run_forge(global: bool, verbose: u8) -> Result<()> {
     }
     fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
 
-    println!("  Forge hook installed to ~/.forge/hooks/{}", FORGE_HOOK_FILE);
+    println!(
+        "  Forge hook installed to ~/.forge/hooks/{}/{}",
+        FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE
+    );
     println!("  RTK.md installed to ~/.forge/RTK.md");
     println!("\nForge Code will now automatically use RTK for shell commands.");
 
