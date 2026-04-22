@@ -906,3 +906,47 @@ mod tests {
         );
     }
 }
+
+// ── Forge hook ───────────────────────────────────────────────
+
+/// Run the Forge Code ToolcallStart hook.
+pub fn run_forge() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+
+    let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if tool_name != "shell" {
+        print_allow();
+        return Ok(());
+    }
+
+    let cmd = json
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        print_allow();
+        return Ok(());
+    }
+
+    let excluded = crate::core::config::Config::load()
+        .map(|c| c.hooks.exclude_commands)
+        .unwrap_or_default();
+
+    match rewrite_command(cmd, &excluded) {
+        Some(ref rewritten) => {
+            if rewritten == cmd {
+                print_allow();
+            } else {
+                audit_log("rewrite", cmd, rewritten);
+                print_rewrite(rewritten);
+            }
+        }
+        None => print_allow(),
+    }
+
+    Ok(())
+}
