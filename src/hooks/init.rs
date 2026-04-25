@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, FORGE_DIR,
+    FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -535,9 +536,27 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, forge: bool, verbose: u8) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
+    }
+
+    if forge {
+        if !global {
+            anyhow::bail!("Forge uninstall only works with --global flag");
+        }
+        let forge_removed =
+            remove_forge_hooks(verbose).context("Failed to remove Forge hooks")?;
+        if !forge_removed.is_empty() {
+            println!("RTK uninstalled (Forge):");
+            for item in &forge_removed {
+                println!("  - {}", item);
+            }
+            println!("\nRestart Forge Code to apply changes.");
+        } else {
+            println!("RTK Forge support was not installed (nothing to remove)");
+        }
+        return Ok(());
     }
 
     if cursor {
@@ -640,6 +659,10 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
 
+    // 7. Remove Forge hooks
+    let forge_removed = remove_forge_hooks(verbose)?;
+    removed.extend(forge_removed);
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -648,7 +671,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         for item in removed {
             println!("  - {}", item);
         }
-        println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+        println!("\nRestart Claude Code, OpenCode, Cursor, and Forge Code (if used) to apply changes.");
     }
 
     Ok(())
@@ -3691,7 +3714,7 @@ More notes
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
-            uninstall(true, false, false, false, 0).unwrap();
+            uninstall(true, false, false, false, false, 0).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -3775,4 +3798,97 @@ More notes
             );
         });
     }
+}
+
+// ─── Forge Code support ─────────────────────────────────────────────
+
+/// Forge hook wrapper script — delegates to `rtk hook forge`
+const FORGE_HOOK_SCRIPT: &str = r#"#!/bin/bash
+exec rtk hook forge
+"#;
+
+fn resolve_forge_dir() -> Result<PathBuf> {
+    resolve_home_subdir(FORGE_DIR)
+}
+
+/// Remove Forge Code hooks from ~/.forge/
+/// Returns list of removed items.
+fn remove_forge_hooks(verbose: u8) -> Result<Vec<String>> {
+    let forge_dir = resolve_forge_dir()?;
+    let mut removed = Vec::new();
+
+    // 1. Remove hook script: ~/.forge/hooks/toolcall-start.d/rtk.sh
+    let hook_path = forge_dir
+        .join(HOOKS_SUBDIR)
+        .join(FORGE_HOOK_EVENT_DIR)
+        .join(FORGE_HOOK_FILE);
+    if hook_path.exists() {
+        fs::remove_file(&hook_path)
+            .with_context(|| format!("Failed to remove Forge hook: {}", hook_path.display()))?;
+        removed.push(format!("Hook script: {}", hook_path.display()));
+        if verbose > 0 {
+            eprintln!("Removed Forge hook: {}", hook_path.display());
+        }
+    }
+
+    // 1b. Remove integrity hash file if exists
+    if integrity::remove_hash(&hook_path)? {
+        removed.push("Integrity hash: removed".to_string());
+    }
+
+    // 2. Remove RTK.md from ~/.forge/
+    let rtk_md_path = forge_dir.join(RTK_MD);
+    if rtk_md_path.exists() {
+        fs::remove_file(&rtk_md_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    Ok(removed)
+}
+
+/// Entry point for `rtk init --agent forge`
+pub fn run_forge(global: bool, hook_only: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Forge support is global-only. Use: rtk init -g --agent forge");
+    }
+
+    let forge_dir = resolve_forge_dir()?;
+    fs::create_dir_all(&forge_dir)
+        .with_context(|| format!("Failed to create Forge config dir: {}", forge_dir.display()))?;
+
+    // 1. Install hook script into ~/.forge/hooks/toolcall-start.d/rtk.sh
+    let hook_dir = forge_dir.join(HOOKS_SUBDIR).join(FORGE_HOOK_EVENT_DIR);
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create Forge hooks dir: {}", hook_dir.display()))?;
+
+    let hook_path = hook_dir.join(FORGE_HOOK_FILE);
+    write_if_changed(&hook_path, FORGE_HOOK_SCRIPT, "Forge hook", verbose)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    integrity::store_hash(&hook_path)
+        .with_context(|| format!("Failed to store integrity hash for {}", hook_path.display()))?;
+
+    // 2. Install RTK.md
+    if !hook_only {
+        let rtk_md_path = forge_dir.join(RTK_MD);
+        write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, verbose)?;
+    }
+
+    println!(
+        "  Forge hook installed to ~/.forge/hooks/{}/{}",
+        FORGE_HOOK_EVENT_DIR, FORGE_HOOK_FILE
+    );
+    if !hook_only {
+        println!("  RTK.md installed to ~/.forge/RTK.md");
+    }
+    println!("\nForge Code will now automatically use RTK for shell commands.");
+
+    Ok(())
 }

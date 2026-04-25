@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Forge Code (tailcallhq)
+    Forge,
 }
 
 #[derive(Parser)]
@@ -736,6 +738,8 @@ enum HookCommands {
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
+    /// Process Forge Code ToolcallStart hook (reads JSON from stdin)
+    Forge,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
     /// Check how a command would be rewritten by the hook engine (dry-run)
@@ -1721,7 +1725,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let forge = agent == Some(AgentTarget::Forge);
+                hooks::init::uninstall(global, gemini, codex, cursor, forge, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1738,6 +1743,8 @@ fn run_cli() -> Result<i32> {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
                 hooks::init::run_kilocode_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Forge) {
+                hooks::init::run_forge(global, hook_only, cli.verbose)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
@@ -2069,6 +2076,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Gemini => {
                 hooks::hook_cmd::run_gemini()?;
+                0
+            }
+            HookCommands::Forge => {
+                hooks::hook_cmd::run_forge()?;
                 0
             }
             HookCommands::Copilot => {

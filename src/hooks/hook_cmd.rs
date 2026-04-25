@@ -905,4 +905,167 @@ mod tests {
             "cargo test should be rewritable when not denied"
         );
     }
+
+    fn forge_input(tool: &str, cmd: &str) -> Value {
+        json!({
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+    }
+
+    #[test]
+    fn test_forge_rewrites_shell_command() {
+        let result = process_forge_payload_with_rules(
+            &forge_input("shell", "git status"),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+
+        assert_eq!(result, ForgeAction::Rewrite("rtk git status".to_string()));
+    }
+
+    #[test]
+    fn test_forge_allows_non_shell_tool() {
+        let result = process_forge_payload_with_rules(
+            &forge_input("read", "git status"),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+
+        assert_eq!(result, ForgeAction::Allow);
+    }
+
+    #[test]
+    fn test_forge_respects_excluded_commands() {
+        let excluded = vec!["git status".to_string()];
+        let result = process_forge_payload_with_rules(
+            &forge_input("shell", "git status"),
+            &[],
+            &[],
+            &[],
+            &excluded,
+        );
+
+        assert_eq!(result, ForgeAction::Allow);
+    }
+
+    #[test]
+    fn test_forge_deny_blocks_rewrite() {
+        let deny = vec!["cargo test".to_string()];
+        let result = process_forge_payload_with_rules(
+            &forge_input("shell", "cargo test"),
+            &deny,
+            &[],
+            &[],
+            &[],
+        );
+
+        assert_eq!(result, ForgeAction::Deny);
+        assert!(
+            get_rewritten("cargo test").is_some(),
+            "cargo test should be rewritable when not denied"
+        );
+    }
+}
+
+// ── Forge hook ───────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq)]
+enum ForgeAction {
+    Allow,
+    Deny,
+    Rewrite(String),
+}
+
+fn process_forge_payload(v: &Value, excluded: &[String]) -> ForgeAction {
+    let tool_name = v.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if tool_name != "shell" {
+        return ForgeAction::Allow;
+    }
+
+    let cmd = v
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return ForgeAction::Allow;
+    }
+
+    // Check deny rules — Forge supports allow/deny (no ask mode).
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        return ForgeAction::Deny;
+    }
+
+    match rewrite_command(cmd, excluded) {
+        Some(rewritten) => {
+            audit_log("rewrite", cmd, &rewritten);
+            ForgeAction::Rewrite(rewritten)
+        }
+        None => ForgeAction::Allow,
+    }
+}
+
+/// Run the Forge Code ToolcallStart hook.
+pub fn run_forge() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
+
+    let excluded = crate::core::config::Config::load()
+        .map(|c| c.hooks.exclude_commands)
+        .unwrap_or_default();
+
+    match process_forge_payload(&json, &excluded) {
+        ForgeAction::Allow => print_allow(),
+        ForgeAction::Deny => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
+            );
+        }
+        ForgeAction::Rewrite(rewritten) => print_rewrite(&rewritten),
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn process_forge_payload_with_rules(
+    v: &Value,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    excluded: &[String],
+) -> ForgeAction {
+    let tool_name = v.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if tool_name != "shell" {
+        return ForgeAction::Allow;
+    }
+
+    let cmd = v
+        .pointer("/tool_input/command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cmd.is_empty() {
+        return ForgeAction::Allow;
+    }
+
+    if permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules)
+        == PermissionVerdict::Deny
+    {
+        return ForgeAction::Deny;
+    }
+
+    match rewrite_command(cmd, excluded) {
+        Some(rewritten) => ForgeAction::Rewrite(rewritten),
+        None => ForgeAction::Allow,
+    }
 }
