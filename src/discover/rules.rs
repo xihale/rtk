@@ -681,6 +681,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^((?:\./)?gradlew?|gradle)\b",
+        rtk_cmd: "rtk gradle",
+        rewrite_prefixes: &["gradle", "gradlew", "./gradlew"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ping\b",
         rtk_cmd: "rtk ping",
         rewrite_prefixes: &["ping"],

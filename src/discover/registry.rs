@@ -748,10 +748,19 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
+            // When the matched prefix contains a path separator (e.g., "./gradlew"),
+            // preserve it so `rtk ./gradlew build` executes the project wrapper
+            // rather than the global `gradle`. For simple names ("cargo", "vitest"),
+            // use rule.rtk_cmd which normalises aliases (e.g., "npx vitest" → "rtk vitest").
+            let rtk_prefix = if prefix.contains('/') {
+                format!("rtk {}", prefix)
             } else {
-                format!("{}{} {}{}", env_prefix, rule.rtk_cmd, rest, redirect_suffix)
+                rule.rtk_cmd.to_string()
+            };
+            let rewritten = if rest.is_empty() {
+                format!("{}{}{}", env_prefix, rtk_prefix, redirect_suffix)
+            } else {
+                format!("{}{} {}{}", env_prefix, rtk_prefix, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -3372,6 +3381,49 @@ mod tests {
         assert_eq!(
             rewrite_command("git log | head | tail && git status", &[]),
             Some("rtk git log | head | tail && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradle_build() {
+        assert_eq!(
+            rewrite_command("gradle build", &[]),
+            Some("rtk gradle build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_build() {
+        assert_eq!(
+            rewrite_command("gradlew build", &[]),
+            Some("rtk gradle build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_with_path() {
+        assert_eq!(
+            rewrite_command("./gradlew build", &[]),
+            Some("rtk ./gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradle_with_java_home_env() {
+        assert_eq!(
+            rewrite_command("JAVA_HOME=/usr/lib/jvm/java-21-openjdk gradle build", &[]),
+            Some("JAVA_HOME=/usr/lib/jvm/java-21-openjdk rtk gradle build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_with_java_home_env() {
+        assert_eq!(
+            rewrite_command(
+                "JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew build",
+                &[]
+            ),
+            Some("JAVA_HOME=/usr/lib/jvm/java-21-openjdk rtk ./gradlew build".into())
         );
     }
 }
