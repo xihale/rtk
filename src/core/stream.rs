@@ -6,6 +6,8 @@ use std::sync::mpsc;
 #[cfg(test)]
 use regex::Regex;
 
+use crate::core::utils::{apply_color_policy, should_disable_color, strip_ansi_if_present};
+
 /// Read `reader` line by line, decoding each line through the console code
 /// page and falling back to lossy UTF-8 (invalid bytes become U+FFFD) instead
 /// of erroring.
@@ -83,6 +85,9 @@ impl<H: BlockHandler> BlockStreamFilter<H> {
 
 impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        let clean_line = strip_ansi_if_present(line);
+        let line = clean_line.as_ref();
+
         if self.handler.should_skip(line) {
             return None;
         }
@@ -281,6 +286,10 @@ pub fn run_streaming(
     stdin_mode: StdinMode,
     stdout_mode: FilterMode<'_>,
 ) -> Result<StreamResult> {
+    apply_color_policy(cmd);
+    let disable_color = should_disable_color();
+    let capture_only = matches!(&stdout_mode, FilterMode::CaptureOnly);
+
     if matches!(stdout_mode, FilterMode::Passthrough) {
         match &stdin_mode {
             StdinMode::Inherit => {
@@ -395,10 +404,16 @@ pub fn run_streaming(
                     StreamLine::Stderr(l) => (l, true),
                     StreamLine::Stdout(l) => (l, false),
                 };
+                let filtered_line = strip_ansi_if_present(&line);
+                let line_for_capture = if disable_color {
+                    filtered_line.as_ref()
+                } else {
+                    &line
+                };
                 if is_stderr {
                     if !capped_err {
-                        if raw_stderr.len() + line.len() < RAW_CAP {
-                            raw_stderr.push_str(&line);
+                        if raw_stderr.len() + line_for_capture.len() + 1 <= RAW_CAP {
+                            raw_stderr.push_str(line_for_capture);
                             raw_stderr.push('\n');
                         } else {
                             capped_err = true;
@@ -406,8 +421,8 @@ pub fn run_streaming(
                         }
                     }
                 } else if !capped_out {
-                    if raw_stdout.len() + line.len() < RAW_CAP {
-                        raw_stdout.push_str(&line);
+                    if raw_stdout.len() + line_for_capture.len() + 1 <= RAW_CAP {
+                        raw_stdout.push_str(line_for_capture);
                         raw_stdout.push('\n');
                     } else {
                         capped_out = true;
@@ -415,7 +430,7 @@ pub fn run_streaming(
                     }
                 }
                 filter_fd_is_stderr = is_stderr;
-                if let Some(output) = filter.feed_line(&line) {
+                if let Some(output) = filter.feed_line(filtered_line.as_ref()) {
                     filtered.push_str(&output);
                     let dest: &mut dyn Write = if is_stderr { &mut err_out } else { &mut out };
                     match write!(dest, "{}", output) {
@@ -447,8 +462,13 @@ pub fn run_streaming(
             let mut raw_err = String::new();
             let mut capped = false;
             for line in read_lines_lossy(stderr) {
-                if raw_err.len() + line.len() < RAW_CAP {
-                    raw_err.push_str(&line);
+                let line_for_capture = if disable_color {
+                    strip_ansi_if_present(&line).into_owned()
+                } else {
+                    line
+                };
+                if raw_err.len() + line_for_capture.len() + 1 <= RAW_CAP {
+                    raw_err.push_str(&line_for_capture);
                     raw_err.push('\n');
                 } else if !capped {
                     capped = true;
@@ -466,8 +486,13 @@ pub fn run_streaming(
                 FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
                 FilterMode::Buffered(filter_fn) => {
                     for line in read_lines_lossy(stdout) {
-                        if raw_stdout.len() + line.len() < RAW_CAP {
-                            raw_stdout.push_str(&line);
+                        let line_for_capture = if disable_color {
+                            strip_ansi_if_present(&line).into_owned()
+                        } else {
+                            line
+                        };
+                        if raw_stdout.len() + line_for_capture.len() + 1 <= RAW_CAP {
+                            raw_stdout.push_str(&line_for_capture);
                             raw_stdout.push('\n');
                         } else if !capped_out {
                             capped_out = true;
@@ -491,8 +516,13 @@ pub fn run_streaming(
                 }
                 FilterMode::CaptureOnly => {
                     for line in read_lines_lossy(stdout) {
-                        if raw_stdout.len() + line.len() < RAW_CAP {
-                            raw_stdout.push_str(&line);
+                        let line_for_capture = if disable_color {
+                            strip_ansi_if_present(&line).into_owned()
+                        } else {
+                            line
+                        };
+                        if raw_stdout.len() + line_for_capture.len() + 1 <= RAW_CAP {
+                            raw_stdout.push_str(&line_for_capture);
                             raw_stdout.push('\n');
                         } else if !capped_out {
                             capped_out = true;
@@ -510,6 +540,14 @@ pub fn run_streaming(
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
             String::new()
         });
+
+        if disable_color {
+            raw_stdout = strip_ansi_if_present(&raw_stdout).into_owned();
+            raw_stderr = strip_ansi_if_present(&raw_stderr).into_owned();
+            if capture_only {
+                filtered = raw_stdout.clone();
+            }
+        }
     }
     if let Some(t) = stdin_thread {
         t.join().ok();
@@ -520,7 +558,8 @@ pub fn run_streaming(
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
     if let Some(mut f) = saved_filter {
-        if let Some(post) = f.on_exit(exit_code, &raw) {
+        let raw_for_summary = strip_ansi_if_present(&raw);
+        if let Some(post) = f.on_exit(exit_code, raw_for_summary.as_ref()) {
             filtered.push_str(&post);
             let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
                 Box::new(io::stderr().lock())
@@ -561,6 +600,7 @@ impl CaptureResult {
 }
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
+    apply_color_policy(cmd);
     cmd.stdin(Stdio::null());
     capture(cmd)
 }
@@ -582,9 +622,17 @@ fn capture(cmd: &mut Command) -> Result<CaptureResult> {
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd.output().context("Failed to execute command")?;
     let exit_code = super::utils::exit_code_from_output(&output, &program);
+    let mut stdout = super::utils::decode_process_output(&output.stdout);
+    let mut stderr = super::utils::decode_process_output(&output.stderr);
+
+    if should_disable_color() {
+        stdout = strip_ansi_if_present(&stdout).into_owned();
+        stderr = strip_ansi_if_present(&stderr).into_owned();
+    }
+
     Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&output.stdout),
-        stderr: super::utils::decode_process_output(&output.stderr),
+        stdout,
+        stderr,
         exit_code,
     })
 }
@@ -970,6 +1018,50 @@ pub(crate) mod tests {
         assert!(combined.contains("err_msg"));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn test_exec_capture_applies_no_color_policy_to_direct_commands() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '%s\n' \"${NO_COLOR:-unset}|${CLICOLOR:-unset}|${CLICOLOR_FORCE:-unset}|${FORCE_COLOR:-unset}|${CARGO_TERM_COLOR:-unset}\"",
+        ]);
+
+        let original_no_color = std::env::var_os("NO_COLOR");
+        let original_clicolor = std::env::var_os("CLICOLOR");
+        let original_clicolor_force = std::env::var_os("CLICOLOR_FORCE");
+        let original_force_color = std::env::var_os("FORCE_COLOR");
+        let original_cargo_term_color = std::env::var_os("CARGO_TERM_COLOR");
+
+        #[allow(unsafe_code)] // test-only env mutation; single-threaded test process
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+            std::env::remove_var("CLICOLOR");
+            std::env::remove_var("CLICOLOR_FORCE");
+            std::env::remove_var("FORCE_COLOR");
+            std::env::remove_var("CARGO_TERM_COLOR");
+        }
+
+        let result = exec_capture(&mut cmd).unwrap();
+
+        restore_env_var("NO_COLOR", original_no_color);
+        restore_env_var("CLICOLOR", original_clicolor);
+        restore_env_var("CLICOLOR_FORCE", original_clicolor_force);
+        restore_env_var("FORCE_COLOR", original_force_color);
+        restore_env_var("CARGO_TERM_COLOR", original_cargo_term_color);
+
+        assert_eq!(result.stdout.trim(), "1|0|0|0|never");
+    }
+
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            #[allow(unsafe_code)] // test-only env mutation; single-threaded test process
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            #[allow(unsafe_code)] // test-only env mutation; single-threaded test process
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
     #[test]
     fn test_capture_result_combined_empty() {
         let r = CaptureResult {
@@ -988,7 +1080,8 @@ pub(crate) mod tests {
             }
         }
         output.push_str(&filter.flush());
-        if let Some(post) = filter.on_exit(exit_code, input) {
+        let raw_for_summary = strip_ansi_if_present(input);
+        if let Some(post) = filter.on_exit(exit_code, raw_for_summary.as_ref()) {
             output.push_str(&post);
         }
         output

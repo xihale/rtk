@@ -277,6 +277,7 @@ where
 {
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
+    cmd.arg("--color=never");
 
     let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
@@ -336,6 +337,7 @@ fn run_cargo_streamed(
 ) -> Result<i32> {
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
+    cmd.arg("--color=never");
 
     let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
@@ -2734,6 +2736,29 @@ error: aborting due to 1 previous error
             savings >= 60.0,
             "token savings dropped below 60%: {savings:.1}%"
         );
+    }
+
+    #[test]
+    fn test_cargo_build_stream_strips_ansi_for_warning_and_progress_matching() {
+        let input = "\x1b[1m\x1b[32m   Checking\x1b[0m ansi-demo v0.1.0\n\
+\x1b[1m\x1b[33mwarning\x1b[0m: unused variable: `x`\n\
+\x1b[0m \x1b[0m\x1b[1m\x1b[38;5;12m--> \x1b[0msrc/main.rs:2:9\n\
+\x1b[0m\x1b[1m\x1b[38;5;12m2\x1b[0m\x1b[0m \x1b[0m\x1b[1m\x1b[38;5;12m|\x1b[0m\x1b[0m     let x = 1;\n\
+\x1b[0m\x1b[1m\x1b[32m    Finished\x1b[0m dev [unoptimized + debuginfo] target(s) in 0.42s\n";
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(
+            result.contains("warning: unused variable: `x`"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("cargo build: 0 errors, 1 warnings (1 crates)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("Checking ansi-demo"), "got: {}", result);
+        assert!(!result.contains("\x1b"), "got: {}", result);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,7 +39,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Strip ANSI escape codes (colors, styles) from a string.
+/// Strip ANSI escape codes (colors, styles, OSC hyperlinks) from a string.
 ///
 /// # Arguments
 /// * `text` - Text potentially containing ANSI escape codes
@@ -50,10 +51,117 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// assert_eq!(strip_ansi(colored), "Error");
 /// ```
 pub fn strip_ansi(text: &str) -> String {
-    static ANSI_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+    static ANSI_CSI_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]").unwrap());
+    static ANSI_OSC_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)").unwrap());
 
-    ANSI_RE.replace_all(text, "").to_string()
+    let without_osc = ANSI_OSC_RE.replace_all(text, "");
+    ANSI_CSI_RE.replace_all(&without_osc, "").to_string()
+}
+
+/// Strip ANSI codes only when present, avoiding allocation for plain text.
+pub fn strip_ansi_if_present(text: &str) -> Cow<'_, str> {
+    if text.as_bytes().contains(&0x1b) {
+        Cow::Owned(strip_ansi(text))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn normalized_env_flag(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn env_flag_is_zeroish(value: &str) -> bool {
+    matches!(
+        normalized_env_flag(value).as_str(),
+        "" | "0" | "false" | "off" | "no"
+    )
+}
+
+fn env_requests_no_color(value: &str) -> bool {
+    !matches!(
+        normalized_env_flag(value).as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EnvSetting {
+    Missing,
+    Value(String),
+    NonUnicode,
+}
+
+fn should_disable_color_from_settings(
+    clicolor_force: &EnvSetting,
+    force_color: &EnvSetting,
+    no_color: &EnvSetting,
+    clicolor: &EnvSetting,
+    term: &EnvSetting,
+) -> bool {
+    if matches!(clicolor_force, EnvSetting::Value(v) if !env_flag_is_zeroish(v)) {
+        return false;
+    }
+
+    if matches!(force_color, EnvSetting::Value(v) if !env_flag_is_zeroish(v)) {
+        return false;
+    }
+
+    match no_color {
+        EnvSetting::Value(v) if env_requests_no_color(v) => return true,
+        EnvSetting::NonUnicode => return true,
+        _ => {}
+    }
+
+    if matches!(clicolor, EnvSetting::Value(v) if normalized_env_flag(v) == "0") {
+        return true;
+    }
+
+    if matches!(term, EnvSetting::Value(v) if normalized_env_flag(v) == "dumb") {
+        return true;
+    }
+
+    false
+}
+
+fn read_env_setting(name: &str) -> EnvSetting {
+    match std::env::var_os(name) {
+        Some(value) => match value.into_string() {
+            Ok(value) => EnvSetting::Value(value),
+            Err(_) => EnvSetting::NonUnicode,
+        },
+        None => EnvSetting::Missing,
+    }
+}
+
+/// Returns true when parent environment explicitly requests colorless child output.
+pub fn should_disable_color() -> bool {
+    let clicolor_force = read_env_setting("CLICOLOR_FORCE");
+    let force_color = read_env_setting("FORCE_COLOR");
+    let no_color = read_env_setting("NO_COLOR");
+    let clicolor = read_env_setting("CLICOLOR");
+    let term = read_env_setting("TERM");
+
+    should_disable_color_from_settings(&clicolor_force, &force_color, &no_color, &clicolor, &term)
+}
+
+/// Apply a broad no-color policy to child commands when parent environment requests it.
+pub fn apply_color_policy(cmd: &mut Command) {
+    if !should_disable_color() {
+        return;
+    }
+
+    cmd.env("NO_COLOR", "1");
+    cmd.env("CLICOLOR", "0");
+    cmd.env("CLICOLOR_FORCE", "0");
+    cmd.env("FORCE_COLOR", "0");
+
+    // Common per-ecosystem knobs. Safe to set globally; ignored by unrelated tools.
+    cmd.env("CARGO_TERM_COLOR", "never");
+    cmd.env("npm_config_color", "false");
+    cmd.env("PY_COLORS", "0");
 }
 
 /// Executes a command and returns cleaned stdout/stderr.
@@ -286,12 +394,15 @@ fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
 /// won't appear in the Gemfile but still need bundler for version isolation).
 pub fn ruby_exec(tool: &str) -> Command {
-    if std::path::Path::new("Gemfile").exists() {
-        let mut c = Command::new("bundle");
+    let mut cmd = if std::path::Path::new("Gemfile").exists() {
+        let mut c = resolved_command("bundle");
         c.arg("exec").arg(tool);
-        return c;
-    }
-    Command::new(tool)
+        c
+    } else {
+        resolved_command(tool)
+    };
+    apply_color_policy(&mut cmd);
+    cmd
 }
 
 /// Count whitespace-delimited tokens in text. Used by filter tests to verify
@@ -379,7 +490,7 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// # Returns
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
-    match resolve_binary(name) {
+    let mut cmd = match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
@@ -394,7 +505,9 @@ pub fn resolved_command(name: &str) -> Command {
 
             Command::new(name)
         }
-    }
+    };
+    apply_color_policy(&mut cmd);
+    cmd
 }
 
 /// Return Composer bin directories in precedence order.
@@ -698,6 +811,67 @@ mod tests {
     fn test_strip_ansi_complex() {
         let input = "\x1b[32mGreen\x1b[0m normal \x1b[31mRed\x1b[0m";
         assert_eq!(strip_ansi(input), "Green normal Red");
+    }
+
+    #[test]
+    fn test_strip_ansi_osc_hyperlink() {
+        let input = "\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
+        assert_eq!(strip_ansi(input), "click");
+    }
+
+    #[test]
+    fn test_strip_ansi_if_present_borrows_plain_text() {
+        let input = "plain text";
+        let stripped = strip_ansi_if_present(input);
+        assert!(matches!(stripped, Cow::Borrowed("plain text")));
+    }
+
+    #[test]
+    fn test_env_flag_helpers() {
+        assert!(env_flag_is_zeroish("0"));
+        assert!(env_flag_is_zeroish("false"));
+        assert!(env_requests_no_color(""));
+        assert!(env_requests_no_color("1"));
+        assert!(!env_requests_no_color("0"));
+    }
+
+    #[test]
+    fn test_should_disable_color_from_settings() {
+        assert!(should_disable_color_from_settings(
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Value("1".to_string()),
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+        ));
+        assert!(should_disable_color_from_settings(
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Value("0".to_string()),
+            &EnvSetting::Missing,
+        ));
+        assert!(should_disable_color_from_settings(
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+            &EnvSetting::Value("dumb".to_string()),
+        ));
+        assert!(!should_disable_color_from_settings(
+            &EnvSetting::Value("1".to_string()),
+            &EnvSetting::Missing,
+            &EnvSetting::Value("1".to_string()),
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+        ));
+        assert!(!should_disable_color_from_settings(
+            &EnvSetting::Missing,
+            &EnvSetting::Value("1".to_string()),
+            &EnvSetting::Value("1".to_string()),
+            &EnvSetting::Missing,
+            &EnvSetting::Missing,
+        ));
     }
 
     #[test]
