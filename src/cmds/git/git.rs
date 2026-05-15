@@ -10,7 +10,7 @@ use crate::core::stream::{
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{
-    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
+    exit_code_from_status, join_with_overflow, resolved_command, strip_ansi, strip_ansi_if_present,
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -336,6 +336,7 @@ fn is_blob_show_arg(arg: &str) -> bool {
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+    let diff = strip_ansi_if_present(diff);
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -2410,6 +2411,21 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_handles_colored_git_output() {
+        let diff = "\x1b[1mdiff --git a/foo.rs b/foo.rs\x1b[m\n\
+\x1b[1m--- a/foo.rs\x1b[m\n\
+\x1b[1m+++ b/foo.rs\x1b[m\n\
+\x1b[36m@@ -1,3 +1,4 @@\x1b[m\n\
+ fn main() {\n\
+\x1b[32m+    println!(\"hello\");\x1b[m\n\
+ }\n";
+        let result = compact_diff(diff, 100);
+        assert!(result.contains("foo.rs"));
+        assert!(result.contains("@@ -1,3 +1,4 @@"));
+        assert!(result.contains("+    println!(\"hello\");"));
     }
 
     #[test]
