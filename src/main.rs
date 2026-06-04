@@ -1406,7 +1406,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             Err(e) => {
                 // Command not found — same behaviour as no-TOML path
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                eprintln!("[rtk: {}]", e);
+                eprintln!(
+                    "[rtk] failed to execute: {}\n  error: {}\n  cwd: {}\n  hint: if this is a local file, ensure it exists and is executable (try: ./gradlew).",
+                    raw_command,
+                    e,
+                    std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string())
+                );
                 Ok(127)
             }
         }
@@ -1430,7 +1437,14 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             Err(e) => {
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
                 // Command not found or other OS error — single message, no duplicate Clap error
-                eprintln!("[rtk: {}]", e);
+                eprintln!(
+                    "[rtk] failed to execute: {}\n  error: {}\n  cwd: {}\n  hint: if this is a local file, ensure it exists and is executable (try: ./gradlew).",
+                    raw_command,
+                    e,
+                    std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string())
+                );
                 Ok(127)
             }
         }

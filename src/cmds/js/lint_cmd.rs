@@ -4,7 +4,7 @@ use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
-use crate::core::utils::{package_manager_exec, resolved_command, truncate};
+use crate::core::utils::{package_manager_exec, resolved_command, strip_ansi_if_present, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -181,11 +181,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         return Ok(result.exit_code);
     }
 
-    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    let raw = result.combined();
 
     // Dispatch to appropriate filter based on linter
     let filtered = match linter {
-        "eslint" => filter_eslint_json(&result.stdout),
+        "eslint" => filter_eslint_json_with_context(&result.stdout, &result.stderr, result.exit_code),
         "ruff" => {
             // Reuse ruff_cmd's JSON parser
             if !result.stdout.trim().is_empty() {
@@ -216,19 +216,45 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-/// Filter ESLint JSON output - group by rule and file
-fn filter_eslint_json(output: &str) -> String {
+fn filter_eslint_json_with_context(output: &str, stderr: &str, exit_code: i32) -> String {
+    let output = strip_ansi_if_present(output);
+    let stderr = strip_ansi_if_present(stderr);
+    let output = output.as_ref();
+    let stderr = stderr.as_ref();
+
+    if output.trim().is_empty() {
+        if stderr.trim().is_empty() {
+            return format!(
+                "ESLint: no output (exit {})\nCommand failed before producing JSON report.",
+                exit_code
+            );
+        }
+
+        return format!(
+            "ESLint: no JSON on stdout (exit {})\nstderr:\n{}",
+            exit_code,
+            truncate(stderr.trim(), config::limits().passthrough_max_chars)
+        );
+    }
+
     let results: Result<Vec<EslintResult>, _> = serde_json::from_str(output);
 
     let results = match results {
         Ok(r) => r,
         Err(e) => {
-            // Fallback if JSON parsing fails
-            return format!(
-                "ESLint output (JSON parse failed: {})\n{}",
+            let mut message = format!(
+                "ESLint output (JSON parse failed: {}; exit {})\nstdout:\n{}",
                 e,
-                truncate(output, config::limits().passthrough_max_chars)
+                exit_code,
+                truncate(output.trim(), config::limits().passthrough_max_chars)
             );
+            if !stderr.trim().is_empty() {
+                message.push_str(&format!(
+                    "\nstderr:\n{}",
+                    truncate(stderr.trim(), config::limits().passthrough_max_chars)
+                ));
+            }
+            return message;
         }
     };
 
@@ -506,6 +532,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_filter_eslint_empty_stdout_includes_stderr() {
+        let result = filter_eslint_json_with_context("", "Error: Failed to load config\n", 2);
+        assert!(result.contains("no JSON on stdout"));
+        assert!(result.contains("exit 2"));
+        assert!(result.contains("Failed to load config"));
+    }
+
+    #[test]
+    fn test_filter_eslint_empty_stdout_and_stderr_reports_no_output() {
+        let result = filter_eslint_json_with_context("", "", 2);
+        assert!(result.contains("no output"));
+        assert!(result.contains("exit 2"));
+    }
+
+    #[test]
+    fn test_filter_eslint_parse_failure_includes_stderr_context() {
+        let result = filter_eslint_json_with_context("not json", "config warning", 2);
+        assert!(result.contains("JSON parse failed"));
+        assert!(result.contains("stdout:"));
+        assert!(result.contains("stderr:"));
+        assert!(result.contains("config warning"));
+    }
+
+    #[test]
     fn test_filter_eslint_json() {
         let json = r#"[
             {
@@ -545,7 +595,7 @@ mod tests {
             }
         ]"#;
 
-        let result = filter_eslint_json(json);
+        let result = filter_eslint_json_with_context(json, "", 0);
         assert!(result.contains("ESLint:"));
         assert!(result.contains("prefer-const"));
         assert!(result.contains("no-unused-vars"));
